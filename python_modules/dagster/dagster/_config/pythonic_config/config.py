@@ -9,8 +9,11 @@ from typing import (
     Set,
     Type,
     cast,
+    get_args,
+    get_origin,
 )
 
+import pydantic
 from pydantic import BaseModel
 from typing_extensions import TypeVar
 
@@ -38,7 +41,7 @@ from dagster._utils.cached_method import CACHED_METHOD_FIELD_SUFFIX
 from .attach_other_object_to_context import (
     IAttachDifferentObjectToOpContext as IAttachDifferentObjectToOpContext,
 )
-from .conversion_utils import _convert_pydantic_field, safe_is_subclass
+from .conversion_utils import _convert_pydantic_field, safe_is_subclass, _get_discriminator_from_annotated_union
 from .pydantic_compat_layer import (
     USING_PYDANTIC_2,
     ModelFieldCompat,
@@ -213,31 +216,15 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
         the appropriate config classes. For example, discriminated unions are represented
         in Dagster config as dicts with a single key, which is the discriminator value.
         """
+        model_field_dict = model_fields(self)
+
         modified_data = {}
         for key, value in config_dict.items():
-            field = model_fields(self).get(key)
+            field = model_field_dict.get(key) # Type: ModelFieldCompat
 
             if field and field.discriminator:
-                nested_dict = value
-
                 discriminator_key = check.not_none(field.discriminator)
-                if isinstance(value, Config):
-                    nested_dict = _discriminated_union_config_dict_to_selector_config_dict(
-                        discriminator_key,
-                        value._get_non_default_public_field_values(),  # noqa: SLF001
-                    )
-
-                nested_items = list(check.is_dict(nested_dict).items())
-                check.invariant(
-                    len(nested_items) == 1,
-                    "Discriminated union must have exactly one key",
-                )
-                discriminated_value, nested_values = nested_items[0]
-
-                modified_data[key] = {
-                    **nested_values,
-                    discriminator_key: discriminated_value,
-                }
+                modified_data[key] = self._move_discriminator(discriminator_key, value)
 
             # If the passed value matches the name of an expected Enum value, convert it to the value
             elif (
@@ -252,15 +239,54 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
                     value
                 )
             else:
-                modified_data[key] = value
+                modified_data[key] = self._move_discriminator_recursively(field.annotation, value) # Yu Huang modification
+                # modified_data[key] = value
 
-        for key, field in model_fields(self).items():
+        for key, field in model_field_dict.items():
             if field.is_required() and key not in modified_data:
                 modified_data[key] = field.default if field.default != PydanticUndefined else None
 
         super().__init__(**modified_data)
         if USING_PYDANTIC_2:
             self.__dict__ = ensure_env_vars_set_post_init(self.__dict__, modified_data)
+
+
+    def _move_discriminator_recursively(self, type_: Type, value: Any):
+        discriminator_key = _get_discriminator_from_annotated_union(type_)
+        if discriminator_key is not None:
+            assert isinstance(value, dict) and len(value) == 1, value
+            return self._move_discriminator(discriminator_key, value)
+        elif safe_is_subclass(get_origin(type_), List) and isinstance(value, list):
+            item_type_ = get_args(type_)[0]
+            return [self._move_discriminator_recursively(item_type_, v) for v in value]
+        elif safe_is_subclass(get_origin(type_), Dict) and isinstance(value, dict):
+            k_type_, v_type_ = get_args(type_)
+            return {self._move_discriminator_recursively(k_type_, k): self._move_discriminator_recursively(v_type_, v) for k, v in value.items()}
+        else:
+            return value
+
+
+    def _move_discriminator(self, discriminator_key: str, value: Dict) -> Dict:
+        nested_dict = value
+
+        if isinstance(value, Config):
+            nested_dict = _discriminated_union_config_dict_to_selector_config_dict(
+                discriminator_key,
+                value._get_non_default_public_field_values(),  # noqa: SLF001
+            )
+
+        nested_items = list(check.is_dict(nested_dict).items())
+        check.invariant(
+            len(nested_items) == 1,
+            "Discriminated union must have exactly one key",
+            )
+        discriminated_value, nested_values = nested_items[0]
+
+        return {
+            **nested_values,
+            discriminator_key: discriminated_value,
+        }
+
 
     def _convert_to_config_dictionary(self) -> Mapping[str, Any]:
         """Converts this Config object to a Dagster config dictionary, in the same format as the dictionary
@@ -336,33 +362,48 @@ def _discriminated_union_config_dict_to_selector_config_dict(
     return wrapped_dict
 
 
-def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], value: Any):
+# Yu Huang modification start =======================
+def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], value: Any, type_: Type = None):
     """Converts a config value to a dictionary representation. If a field is provided, it will be used
     to determine the appropriate dictionary representation in the case of discriminated unions.
     """
     from dagster._config.field_utils import env_var_to_config_dict, is_dagster_env_var
 
+    if type_ is None and field is not None:
+        type_ = field.annotation
+
     if isinstance(value, dict):
-        return {k: _config_value_to_dict_representation(None, v) for k, v in value.items()}
+        k_type_, v_type_ = (None, None) if type_ is None else get_args(type_)
+        return {k: _config_value_to_dict_representation(None, v, type_=v_type_) for k, v in value.items()}
     elif isinstance(value, list):
-        return [_config_value_to_dict_representation(None, v) for v in value]
+        item_type_ = None if type_ is None else get_args(type_)[0]
+        return [_config_value_to_dict_representation(None, v, type_=item_type_) for v in value]
     elif is_dagster_env_var(value):
         return env_var_to_config_dict(value)
+
     if isinstance(value, Config):
+        discriminator_key = None
         if field and field.discriminator:
+            discriminator_key = field.discriminator
+        if discriminator_key is None:
+            discriminator_key = _get_discriminator_from_annotated_union(type_)
+
+        if discriminator_key is not None:
             return {
                 k: v
                 for k, v in _discriminated_union_config_dict_to_selector_config_dict(
-                    field.discriminator,
+                    discriminator_key,
                     value._convert_to_config_dictionary(),  # noqa: SLF001
                 ).items()
             }
+
         else:
             return {k: v for k, v in value._convert_to_config_dictionary().items()}  # noqa: SLF001
     elif isinstance(value, Enum):
         return value.name
 
     return value
+# Yu Huang modification end =======================
 
 
 class PermissiveConfig(Config):

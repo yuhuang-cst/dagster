@@ -175,3 +175,7 @@ scripts/.build
 
 # dbt .user files
 .user.yml
+
+# Yu Huang add
+rsync.sh
+rsync_exclude.txt

@@ -11,6 +11,7 @@ from typing import (
     Union,
 )
 
+import pydantic
 from typing_extensions import Annotated, get_args, get_origin
 
 from dagster import (
@@ -110,7 +111,7 @@ TResValue = TypeVar("TResValue")
 
 
 def _convert_pydantic_field(
-    pydantic_field: ModelFieldCompat, model_cls: Optional[Type] = None
+        pydantic_field: ModelFieldCompat, model_cls: Optional[Type] = None
 ) -> Field:
     """Transforms a Pydantic field into a corresponding Dagster config field.
 
@@ -164,16 +165,39 @@ def strip_wrapping_annotated_types(potentially_annotated_type: Any) -> Any:
         potentially_annotated_type = get_args(potentially_annotated_type)[0]
     return potentially_annotated_type
 
+# Yu Huang modification start =======================
+def _is_union_annoated_with_discriminator_typing(cls: Type) -> bool:
+    return _get_discriminator_from_annotated_union(cls) is not None
+
+
+def _get_discriminator_from_annotated_union(cls: Type) -> Union[str, None]:
+    try:
+        for anno_item in getattr(cls, '__metadata__', []):
+            if isinstance(anno_item, pydantic.fields.FieldInfo) and getattr(anno_item, 'discriminator', None) is not None:
+                return anno_item.discriminator
+        return None
+    except:
+        return None
+# Yu Huang modification end =======================
 
 def _config_type_for_type_on_pydantic_field(
-    potential_dagster_type: Any,
+        potential_dagster_type: Any,
 ) -> ConfigType:
     """Generates a Dagster ConfigType from a Pydantic field's Python type.
 
     Args:
         potential_dagster_type (Any): The Python type of the Pydantic field.
     """
+    raw_potential_dagster_type = potential_dagster_type
     potential_dagster_type = strip_wrapping_annotated_types(potential_dagster_type)
+
+    # Yu Huang modification start =======================
+    discriminator_key = _get_discriminator_from_annotated_union(raw_potential_dagster_type)
+    if discriminator_key is not None:
+        inferred_field = _convert_pydantic_discriminated_union_field_inner(
+            potential_dagster_type, discriminator_key)
+        return inferred_field.config_type
+    # Yu Huang modification end =======================
 
     try:
         # Pydantic 1.x
@@ -200,7 +224,7 @@ def _config_type_for_type_on_pydantic_field(
         )
         return Noneable(_config_type_for_type_on_pydantic_field(optional_inner_type))
     elif safe_is_subclass(get_origin(potential_dagster_type), Dict) or safe_is_subclass(
-        get_origin(potential_dagster_type), Mapping
+            get_origin(potential_dagster_type), Mapping
     ):
         key_type, value_type = get_args(potential_dagster_type)
         return Map(
@@ -230,35 +254,9 @@ def _config_type_for_type_on_pydantic_field(
         return convert_potential_field(potential_dagster_type).config_type
 
 
-def _convert_pydantic_discriminated_union_field(pydantic_field: ModelFieldCompat) -> Field:
-    """Builds a Selector config field from a Pydantic field which is a discriminated union.
-
-    For example:
-
-    class Cat(Config):
-        pet_type: Literal["cat"]
-        meows: int
-
-    class Dog(Config):
-        pet_type: Literal["dog"]
-        barks: float
-
-    class OpConfigWithUnion(Config):
-        pet: Union[Cat, Dog] = Field(..., discriminator="pet_type")
-
-    Becomes:
-
-    Shape({
-      "pet": Selector({
-          "cat": Shape({"meows": Int}),
-          "dog": Shape({"barks": Float}),
-      })
-    })
-    """
+# Yu Huang modification start =======================
+def _convert_pydantic_discriminated_union_field_inner(field_type: Any, discriminator: str) -> Field:
     from .config import Config, infer_schema_from_config_class
-
-    field_type = pydantic_field.annotation
-    discriminator = pydantic_field.discriminator if pydantic_field.discriminator else None
 
     if not get_origin(field_type) == Union:
         raise DagsterInvalidDefinitionError("Discriminated union must be a Union type.")
@@ -292,6 +290,37 @@ def _convert_pydantic_discriminated_union_field(pydantic_field: ModelFieldCompat
     return Field(config=Selector(fields=dagster_config_field_mapping))
 
 
+def _convert_pydantic_discriminated_union_field(pydantic_field: ModelFieldCompat) -> Field:
+    """Builds a Selector config field from a Pydantic field which is a discriminated union.
+
+    For example:
+
+    class Cat(Config):
+        pet_type: Literal["cat"]
+        meows: int
+
+    class Dog(Config):
+        pet_type: Literal["dog"]
+        barks: float
+
+    class OpConfigWithUnion(Config):
+        pet: Union[Cat, Dog] = Field(..., discriminator="pet_type")
+
+    Becomes:
+
+    Shape({
+      "pet": Selector({
+          "cat": Shape({"meows": Int}),
+          "dog": Shape({"barks": Float}),
+      })
+    })
+    """
+    field_type = pydantic_field.annotation
+    discriminator = pydantic_field.discriminator if pydantic_field.discriminator else None
+    return _convert_pydantic_discriminated_union_field_inner(field_type, discriminator)
+# Yu Huang modification end =======================
+
+
 def infer_schema_from_config_annotation(model_cls: Any, config_arg_default: Any) -> Field:
     """Parses a structured config class or primitive type and returns a corresponding Dagster config Field."""
     from .config import Config, infer_schema_from_config_class
@@ -300,7 +329,7 @@ def infer_schema_from_config_annotation(model_cls: Any, config_arg_default: Any)
         check.invariant(
             config_arg_default is inspect.Parameter.empty,
             "Cannot provide a default value when using a Config class",
-        )
+            )
         return infer_schema_from_config_class(model_cls)
 
     # If were are here config is annotated with a primitive type
