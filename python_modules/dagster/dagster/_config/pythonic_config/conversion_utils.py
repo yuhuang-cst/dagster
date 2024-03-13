@@ -145,7 +145,8 @@ def _convert_pydantic_field(
             else FIELD_NO_DEFAULT_PROVIDED
         )
         if isinstance(default_to_pass, Enum):
-            default_to_pass = default_to_pass.name
+            default_to_pass = default_to_pass.value # Yu Huang modification
+            # default_to_pass = default_to_pass.name
 
         return Field(
             config=config_type,

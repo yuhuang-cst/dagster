@@ -239,8 +239,10 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
                     value
                 )
             else:
-                modified_data[key] = self._move_discriminator_recursively(field.annotation, value) # Yu Huang modification
-                # modified_data[key] = value
+                if field:
+                    modified_data[key] = self._move_discriminator_recursively(field.annotation, value) # Yu Huang modification
+                else:
+                    modified_data[key] = value
 
         for key, field in model_field_dict.items():
             if field.is_required() and key not in modified_data:
@@ -400,7 +402,8 @@ def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], valu
         else:
             return {k: v for k, v in value._convert_to_config_dictionary().items()}  # noqa: SLF001
     elif isinstance(value, Enum):
-        return value.name
+        return value.value # Yu Huang modification
+        # return value.name
 
     return value
 # Yu Huang modification end =======================
