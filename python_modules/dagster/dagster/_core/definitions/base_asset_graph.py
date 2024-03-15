@@ -82,7 +82,7 @@ class BaseAssetNode(ABC):
 
     @property
     @abstractmethod
-    def group_name(self) -> Optional[str]: ...
+    def group_name(self) -> str: ...
 
     @property
     @abstractmethod
@@ -198,6 +198,10 @@ class BaseAssetGraph(ABC, Generic[T_AssetNode]):
         return {node.key for node in self.asset_nodes if node.is_executable}
 
     @cached_property
+    def unexecutable_asset_keys(self) -> AbstractSet[AssetKey]:
+        return {node.key for node in self.asset_nodes if not node.is_executable}
+
+    @cached_property
     def toposorted_asset_keys(self) -> Sequence[AssetKey]:
         """Return topologically sorted asset keys in graph. Keys with the same topological level are
         sorted alphabetically to provide stability.
@@ -242,9 +246,9 @@ class BaseAssetGraph(ABC, Generic[T_AssetNode]):
             self.asset_dep_graph, self.observable_asset_keys | self.materializable_asset_keys
         )
 
-    @cached_property
-    def asset_check_keys(self) -> AbstractSet[AssetCheckKey]:
-        return {key for asset in self.asset_nodes for key in asset.check_keys}
+    @property
+    @abstractmethod
+    def asset_check_keys(self) -> AbstractSet[AssetCheckKey]: ...
 
     @cached_property
     def all_partitions_defs(self) -> Sequence[PartitionsDefinition]:

@@ -61,6 +61,7 @@ from dagster_graphql.schema.solids import (
     GrapheneResourceRequirement,
     GrapheneSolidDefinition,
 )
+from dagster_graphql.schema.tags import GrapheneDefinitionTag
 
 from ..implementation.fetch_assets import (
     build_partition_statuses,
@@ -303,6 +304,7 @@ class GrapheneAssetNode(graphene.ObjectType):
     assetPartitionStatuses = graphene.NonNull(GrapheneAssetPartitionStatuses)
     partitionStats = graphene.Field(GraphenePartitionStats)
     metadata_entries = non_null_list(GrapheneMetadataEntry)
+    tags = non_null_list(GrapheneDefinitionTag)
     op = graphene.Field(GrapheneSolidDefinition)
     opName = graphene.String()
     opNames = non_null_list(graphene.String)
@@ -565,7 +567,7 @@ class GrapheneAssetNode(graphene.ObjectType):
             return []
 
         instance = graphene_info.context.instance
-        asset_graph = RemoteAssetGraph.from_external_repository(self._external_repository)
+        asset_graph = self._external_repository.asset_graph
         asset_key = self._external_asset_node.asset_key
 
         # in the future, we can share this same CachingInstanceQueryer across all
@@ -883,7 +885,7 @@ class GrapheneAssetNode(graphene.ObjectType):
         self, graphene_info: ResolveInfo
     ) -> Optional[GrapheneAssetFreshnessInfo]:
         if self._external_asset_node.freshness_policy:
-            asset_graph = RemoteAssetGraph.from_external_repository(self._external_repository)
+            asset_graph = self._external_repository.asset_graph
             return get_freshness_info(
                 asset_key=self._external_asset_node.asset_key,
                 # in the future, we can share this same CachingInstanceQueryer across all
@@ -927,7 +929,7 @@ class GrapheneAssetNode(graphene.ObjectType):
         external_sensors = self._external_repository.get_external_sensors()
         external_schedules = self._external_repository.get_external_schedules()
 
-        asset_graph = RemoteAssetGraph.from_external_repository(self._external_repository)
+        asset_graph = self._external_repository.asset_graph
 
         job_names = {
             job_name
@@ -957,7 +959,7 @@ class GrapheneAssetNode(graphene.ObjectType):
         return results
 
     def _get_auto_materialize_external_sensor(self) -> Optional[ExternalSensor]:
-        asset_graph = RemoteAssetGraph.from_external_repository(self._external_repository)
+        asset_graph = self._external_repository.asset_graph
 
         asset_key = self._external_asset_node.asset_key
         matching_sensors = [
@@ -1189,6 +1191,12 @@ class GrapheneAssetNode(graphene.ObjectType):
         self, _graphene_info: ResolveInfo
     ) -> Sequence[GrapheneMetadataEntry]:
         return list(iterate_metadata_entries(self._external_asset_node.metadata))
+
+    def resolve_tags(self, _graphene_info: ResolveInfo) -> Sequence[GrapheneDefinitionTag]:
+        return [
+            GrapheneDefinitionTag(key, value)
+            for key, value in (self._external_asset_node.tags or {}).items()
+        ]
 
     def resolve_op(
         self, _graphene_info: ResolveInfo

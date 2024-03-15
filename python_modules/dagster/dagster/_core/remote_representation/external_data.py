@@ -47,7 +47,6 @@ from dagster._core.definitions import (
     ScheduleDefinition,
 )
 from dagster._core.definitions.asset_check_spec import AssetCheckKey
-from dagster._core.definitions.asset_checks import AssetChecksDefinition
 from dagster._core.definitions.asset_sensor_definition import AssetSensorDefinition
 from dagster._core.definitions.asset_spec import (
     SYSTEM_METADATA_KEY_ASSET_EXECUTION_TYPE,
@@ -1195,6 +1194,7 @@ class ExternalAssetNode(
             ("output_name", Optional[str]),
             ("output_description", Optional[str]),
             ("metadata", Mapping[str, MetadataValue]),
+            ("tags", Optional[Mapping[str, str]]),
             ("group_name", Optional[str]),
             ("freshness_policy", Optional[FreshnessPolicy]),
             ("is_source", bool),
@@ -1234,6 +1234,7 @@ class ExternalAssetNode(
         output_name: Optional[str] = None,
         output_description: Optional[str] = None,
         metadata: Optional[Mapping[str, MetadataValue]] = None,
+        tags: Optional[Mapping[str, str]] = None,
         group_name: Optional[str] = None,
         freshness_policy: Optional[FreshnessPolicy] = None,
         is_source: Optional[bool] = None,
@@ -1313,6 +1314,7 @@ class ExternalAssetNode(
             output_name=check.opt_str_param(output_name, "output_name"),
             output_description=check.opt_str_param(output_description, "output_description"),
             metadata=metadata,
+            tags=check.opt_mapping_param(tags, "tags", key_type=str, value_type=str),
             group_name=check.opt_str_param(group_name, "group_name"),
             freshness_policy=check.opt_inst_param(
                 freshness_policy, "freshness_policy", FreshnessPolicy
@@ -1517,17 +1519,11 @@ def external_repository_data_from_def(
 def external_asset_checks_from_defs(
     job_defs: Sequence[JobDefinition],
 ) -> Sequence[ExternalAssetCheck]:
-    nodes_by_check_key: Dict[
-        AssetCheckKey, List[Union[AssetsDefinition, AssetChecksDefinition]]
-    ] = {}
+    nodes_by_check_key: Dict[AssetCheckKey, List[AssetsDefinition]] = {}
     job_names_by_check_key: Dict[AssetCheckKey, List[str]] = {}
 
     for job_def in job_defs:
         asset_layer = job_def.asset_layer
-        for asset_check_def in asset_layer.asset_checks_defs:
-            for spec in asset_check_def.specs:
-                nodes_by_check_key.setdefault(spec.key, []).append(asset_check_def)
-                job_names_by_check_key.setdefault(spec.key, []).append(job_def.name)
         for asset_def in asset_layer.assets_defs_by_node_handle.values():
             for spec in asset_def.check_specs:
                 nodes_by_check_key.setdefault(spec.key, []).append(asset_def)
@@ -1538,29 +1534,17 @@ def external_asset_checks_from_defs(
         first_node = nodes[0]
         # The same check may appear multiple times in different jobs, but it should come from the
         # same definition.
-        if isinstance(first_node, AssetChecksDefinition):
-            check.is_list(
-                nodes,
-                of_type=AssetChecksDefinition,
-                additional_message=f"Check {check_key} is redefined in an AssetsDefinition and an AssetChecksDefinition",
-            )
-            execution_set_identifier = None
-        elif isinstance(first_node, AssetsDefinition):
-            check.is_list(
-                nodes,
-                of_type=AssetsDefinition,
-                additional_message=f"Check {check_key} is redefined in an AssetsDefinition and an AssetChecksDefinition",
-            )
+        check.is_list(
+            nodes,
+            of_type=AssetsDefinition,
+            additional_message=f"Check {check_key} is redefined in an AssetsDefinition and an AssetChecksDefinition",
+        )
 
-            # Executing individual checks isn't supported in graph assets
-            if isinstance(first_node.node_def, GraphDefinition):
-                execution_set_identifier = first_node.unique_id
-            else:
-                execution_set_identifier = (
-                    first_node.unique_id if not first_node.can_subset else None
-                )
+        # Executing individual checks isn't supported in graph assets
+        if isinstance(first_node.node_def, GraphDefinition):
+            execution_set_identifier = first_node.unique_id
         else:
-            check.failed(f"Unexpected node type {first_node}")
+            execution_set_identifier = first_node.unique_id if not first_node.can_subset else None
 
         spec = first_node.get_spec_for_check_key(check_key)
         external_checks.append(
@@ -1586,6 +1570,7 @@ def external_asset_nodes_from_defs(
     asset_info_by_asset_key: Dict[AssetKey, AssetOutputInfo] = dict()
     freshness_policy_by_asset_key: Dict[AssetKey, FreshnessPolicy] = dict()
     metadata_by_asset_key: Dict[AssetKey, RawMetadataMapping] = dict()
+    tags_by_asset_key: Dict[AssetKey, Mapping[str, str]] = dict()
     auto_materialize_policy_by_asset_key: Dict[AssetKey, AutoMaterializePolicy] = dict()
     backfill_policy_by_asset_key: Dict[AssetKey, Optional[BackfillPolicy]] = dict()
 
@@ -1622,9 +1607,7 @@ def external_asset_nodes_from_defs(
             all_upstream_asset_keys.update(upstream_asset_keys)
             node_defs_by_asset_key[output_key].append((node_output_handle, job_def))
             asset_info_by_asset_key[output_key] = asset_info
-            execution_types_by_asset_key[output_key] = asset_layer.execution_type_for_asset(
-                output_key
-            )
+            execution_types_by_asset_key[output_key] = asset_layer.get(output_key).execution_type
 
             for upstream_key in upstream_asset_keys:
                 partition_mapping = asset_layer.partition_mapping_for_node_input(
@@ -1643,8 +1626,9 @@ def external_asset_nodes_from_defs(
                     downstream_asset_key=output_key
                 )
 
-        for assets_def in asset_layer.assets_defs:
+        for assets_def in [ad for ad in asset_layer.assets_defs if ad.is_executable]:
             metadata_by_asset_key.update(assets_def.metadata_by_key)
+            tags_by_asset_key.update(assets_def.tags_by_key)
             freshness_policy_by_asset_key.update(assets_def.freshness_policies_by_key)
             auto_materialize_policy_by_asset_key.update(assets_def.auto_materialize_policies_by_key)
             backfill_policy_by_asset_key.update(
@@ -1664,7 +1648,9 @@ def external_asset_nodes_from_defs(
             if len(assets_def.keys) == 1 and assets_def.check_keys and not assets_def.can_subset:
                 execution_set_identifiers[assets_def.key] = assets_def.unique_id
 
-        group_name_by_asset_key.update(asset_layer.group_names_by_assets())
+        group_name_by_asset_key.update(
+            {k: asset_layer.get(k).group_name for k in asset_layer.all_asset_keys}
+        )
 
     asset_nodes: List[ExternalAssetNode] = []
 
@@ -1703,7 +1689,6 @@ def external_asset_nodes_from_defs(
         while node_handle.parent:
             node_handle = node_handle.parent
             graph_name = node_handle.name
-
         asset_nodes.append(
             ExternalAssetNode(
                 asset_key=asset_key,
@@ -1724,6 +1709,7 @@ def external_asset_nodes_from_defs(
                 partitions_def_data=partitions_def_data,
                 output_name=output_def.name,
                 metadata=asset_metadata,
+                tags=tags_by_asset_key.get(asset_key),
                 is_source=execution_types_by_asset_key.get(asset_key)
                 != AssetExecutionType.MATERIALIZATION,
                 is_observable=is_observable_by_key.get(asset_key, False),

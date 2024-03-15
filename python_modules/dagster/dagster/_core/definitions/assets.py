@@ -374,7 +374,6 @@ class AssetsDefinition(ResourceAddable, RequiresResources, IHasInternalInit):
             for key, owners in (owners_by_key or {}).items()
         }
 
-    @staticmethod
     def dagster_internal_init(
         *,
         keys_by_input_name: Mapping[str, AssetKey],
@@ -899,6 +898,10 @@ class AssetsDefinition(ResourceAddable, RequiresResources, IHasInternalInit):
     def has_keys(self) -> bool:
         return len(self.keys) > 0
 
+    @property
+    def has_check_keys(self) -> bool:
+        return len(self.check_keys) > 0
+
     @public
     @property
     def dependency_keys(self) -> Iterable[AssetKey]:
@@ -945,7 +948,11 @@ class AssetsDefinition(ResourceAddable, RequiresResources, IHasInternalInit):
 
     @property
     def keys_by_input_name(self) -> Mapping[str, AssetKey]:
-        upstream_keys = {dep_key for key in self.keys for dep_key in self.asset_deps[key]}
+        upstream_keys = {
+            *(dep_key for key in self.keys for dep_key in self.asset_deps[key]),
+            *(spec.asset_key for spec in self.check_specs if spec.asset_key not in self.keys),
+        }
+
         return {
             name: key for name, key in self.node_keys_by_input_name.items() if key in upstream_keys
         }
@@ -1112,7 +1119,6 @@ class AssetsDefinition(ResourceAddable, RequiresResources, IHasInternalInit):
             Union[AutoMaterializePolicy, Mapping[AssetKey, AutoMaterializePolicy]]
         ] = None,
         backfill_policy: Optional[BackfillPolicy] = None,
-        is_subset: bool = False,
         check_specs_by_output_name: Optional[Mapping[str, AssetCheckSpec]] = None,
         selected_asset_check_keys: Optional[AbstractSet[AssetCheckKey]] = None,
     ) -> "AssetsDefinition":
@@ -1277,7 +1283,7 @@ class AssetsDefinition(ResourceAddable, RequiresResources, IHasInternalInit):
                 **self._descriptions_by_key,
                 **replaced_descriptions_by_key,
             },
-            is_subset=is_subset,
+            is_subset=self.is_subset,
             check_specs_by_output_name=check_specs_by_output_name
             if check_specs_by_output_name
             else self.check_specs_by_output_name,

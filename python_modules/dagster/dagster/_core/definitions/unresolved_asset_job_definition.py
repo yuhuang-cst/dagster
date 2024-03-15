@@ -221,9 +221,7 @@ class UnresolvedAssetJobDefinition(
         return build_asset_selection_job(
             name=self.name,
             assets=assets,
-            asset_checks=asset_graph.asset_checks_defs,
             config=self.config,
-            source_assets=[],
             description=self.description,
             tags=self.tags,
             metadata=self.metadata,
