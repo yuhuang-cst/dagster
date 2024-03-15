@@ -9,6 +9,7 @@ from typing import (
     Type,
     TypeVar,
     Union,
+    Hashable,
 )
 
 import pydantic
@@ -217,7 +218,15 @@ def _config_type_for_type_on_pydantic_field(
         pass
 
     if safe_is_subclass(get_origin(potential_dagster_type), List):
-        list_inner_type = get_args(potential_dagster_type)[0]
+        # Yu Huang modification start =======================
+        item_type_args = get_args(potential_dagster_type)
+        if len(item_type_args) > 0:
+            list_inner_type = item_type_args[0]
+        else:
+            list_inner_type = Any
+        # list_inner_type = get_args(potential_dagster_type)[0]
+        # Yu Huang modification end =======================
+
         return Array(_config_type_for_type_on_pydantic_field(list_inner_type))
     elif is_optional(potential_dagster_type):
         optional_inner_type = next(
@@ -227,7 +236,15 @@ def _config_type_for_type_on_pydantic_field(
     elif safe_is_subclass(get_origin(potential_dagster_type), Dict) or safe_is_subclass(
             get_origin(potential_dagster_type), Mapping
     ):
-        key_type, value_type = get_args(potential_dagster_type)
+        # Yu Huang modification start =======================
+        kv_types = get_args(potential_dagster_type)
+        if len(kv_types) > 0:
+            key_type, value_type = kv_types
+        else:
+            key_type, value_type = str, Any
+        # key_type, value_type = get_args(potential_dagster_type)
+        # Yu Huang modification end =======================
+
         return Map(
             key_type,
             _config_type_for_type_on_pydantic_field(value_type),

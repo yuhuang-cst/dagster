@@ -41,7 +41,7 @@ from dagster._utils.cached_method import CACHED_METHOD_FIELD_SUFFIX
 from .attach_other_object_to_context import (
     IAttachDifferentObjectToOpContext as IAttachDifferentObjectToOpContext,
 )
-from .conversion_utils import _convert_pydantic_field, safe_is_subclass, _get_discriminator_from_annotated_union
+from .conversion_utils import _convert_pydantic_field, safe_is_subclass, is_optional, _get_discriminator_from_annotated_union
 from .pydantic_compat_layer import (
     USING_PYDANTIC_2,
     ModelFieldCompat,
@@ -239,10 +239,12 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
                     value
                 )
             else:
+                # Yu Huang modification start =======================
                 if field:
                     modified_data[key] = self._move_discriminator_recursively(field.annotation, value) # Yu Huang modification
                 else:
                     modified_data[key] = value
+                # Yu Huang modification end =======================
 
         for key, field in model_field_dict.items():
             if field.is_required() and key not in modified_data:
@@ -253,11 +255,17 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
             self.__dict__ = ensure_env_vars_set_post_init(self.__dict__, modified_data)
 
 
+    # Yu Huang modification start =======================
     def _move_discriminator_recursively(self, type_: Type, value: Any):
         discriminator_key = _get_discriminator_from_annotated_union(type_)
         if discriminator_key is not None:
             assert isinstance(value, dict) and len(value) == 1, value
             return self._move_discriminator(discriminator_key, value)
+        elif is_optional(type_) and value is not None:
+            optional_inner_type = next(
+                arg for arg in get_args(type_) if arg is not type(None)
+            )
+            return self._move_discriminator_recursively(optional_inner_type, value)
         elif safe_is_subclass(get_origin(type_), List) and isinstance(value, list):
             item_type_ = get_args(type_)[0]
             return [self._move_discriminator_recursively(item_type_, v) for v in value]
@@ -266,6 +274,7 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
             return {self._move_discriminator_recursively(k_type_, k): self._move_discriminator_recursively(v_type_, v) for k, v in value.items()}
         else:
             return value
+    # Yu Huang modification end =======================
 
 
     def _move_discriminator(self, discriminator_key: str, value: Dict) -> Dict:
