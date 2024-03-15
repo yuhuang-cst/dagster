@@ -211,11 +211,20 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
 
     """
 
+    # Yu Huang modification start =======================
+    @classmethod
+    def preprocess_data(cls, data: Any) -> Any:
+        return data
+    # Yu Huang modification start =======================
+
+
     def __init__(self, **config_dict) -> None:
         """This constructor is overridden to handle any remapping of raw config dicts to
         the appropriate config classes. For example, discriminated unions are represented
         in Dagster config as dicts with a single key, which is the discriminator value.
         """
+        config_dict = self.preprocess_data(config_dict)
+
         model_field_dict = model_fields(self)
 
         modified_data = {}
