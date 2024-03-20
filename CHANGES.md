@@ -1,5 +1,14 @@
 # Changelog
 
+<<<<<<< HEAD
+=======
+## 1.6.11 (core) / 0.22.11 (libraries)
+
+### Bugfixes
+
+- Fixed an issue where `dagster dev` or the Dagster UI would display an error when loading jobs created with op or asset selections.
+
+>>>>>>> 1.6.11
 ## 1.6.10 (core) / 0.22.10 (libraries)
 
 ### New
