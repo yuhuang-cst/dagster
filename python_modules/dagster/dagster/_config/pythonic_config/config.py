@@ -4,6 +4,7 @@ from typing import (
     Any,
     Dict,
     List,
+    Union,
     Mapping,
     Optional,
     Set,
@@ -383,6 +384,24 @@ def _discriminated_union_config_dict_to_selector_config_dict(
 
 
 # Yu Huang modification start =======================
+def get_list_inner_type(type_: Type) -> Union[Type, None]:
+    if type_ is None:
+        return None
+    inner_type = get_args(type_)
+    if len(inner_type) == 0:
+        return Any
+    return inner_type[0]
+
+
+def get_dict_inner_type(type_: Type):
+    if type_ is None:
+        return None, None
+    kv_types = get_args(type_)
+    if len(kv_types) == 0:
+        return None, None
+    return kv_types
+
+
 def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], value: Any, type_: Type = None):
     """Converts a config value to a dictionary representation. If a field is provided, it will be used
     to determine the appropriate dictionary representation in the case of discriminated unions.
@@ -393,14 +412,13 @@ def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], valu
         type_ = field.annotation
 
     if isinstance(value, dict):
-        k_type_, v_type_ = (None, None) if type_ is None else get_args(type_)
+        k_type_, v_type_ = get_dict_inner_type(type_)
         return {k: _config_value_to_dict_representation(None, v, type_=v_type_) for k, v in value.items()}
     elif isinstance(value, list):
-        item_type_ = None if type_ is None else get_args(type_)[0]
+        item_type_ = get_list_inner_type(type_)
         return [_config_value_to_dict_representation(None, v, type_=item_type_) for v in value]
     elif is_dagster_env_var(value):
         return env_var_to_config_dict(value)
-
     if isinstance(value, Config):
         discriminator_key = None
         if field and field.discriminator:
