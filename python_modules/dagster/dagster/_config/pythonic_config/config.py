@@ -317,6 +317,7 @@ class Config(MakeConfigCacheable, metaclass=BaseConfigMeta):
         or EnvVars will be converted to the appropriate dictionary representation.
         """
         public_fields = self._get_non_default_public_field_values()
+
         return {
             k: _config_value_to_dict_representation(model_fields(self).get(k), v)
             for k, v in public_fields.items()
@@ -412,9 +413,13 @@ def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], valu
         type_ = field.annotation
 
     if isinstance(value, dict):
+        if is_optional(type_): # Optional[T] -> T
+            type_ = next(arg for arg in get_args(type_) if arg is not type(None))
         k_type_, v_type_ = get_dict_inner_type(type_)
         return {k: _config_value_to_dict_representation(None, v, type_=v_type_) for k, v in value.items()}
     elif isinstance(value, list):
+        if is_optional(type_): # Optional[T] -> T
+            type_ = next(arg for arg in get_args(type_) if arg is not type(None))
         item_type_ = get_list_inner_type(type_)
         return [_config_value_to_dict_representation(None, v, type_=item_type_) for v in value]
     elif is_dagster_env_var(value):
@@ -424,6 +429,8 @@ def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], valu
         if field and field.discriminator:
             discriminator_key = field.discriminator
         if discriminator_key is None:
+            if is_optional(type_): # Optional[T] -> T
+                type_ = next(arg for arg in get_args(type_) if arg is not type(None))
             discriminator_key = _get_discriminator_from_annotated_union(type_)
 
         if discriminator_key is not None:
@@ -434,9 +441,9 @@ def _config_value_to_dict_representation(field: Optional[ModelFieldCompat], valu
                     value._convert_to_config_dictionary(),  # noqa: SLF001
                 ).items()
             }
-
         else:
             return {k: v for k, v in value._convert_to_config_dictionary().items()}  # noqa: SLF001
+
     elif isinstance(value, Enum):
         return value.value # Yu Huang modification
         # return value.name
