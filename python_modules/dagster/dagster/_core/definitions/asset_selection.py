@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from typing_extensions import TypeAlias
 
 import dagster._check as check
-from dagster._annotations import deprecated, experimental_param, public
+from dagster._annotations import deprecated, experimental, experimental_param, public
 from dagster._core.definitions.asset_graph import AssetGraph
 from dagster._core.definitions.resolved_asset_deps import resolve_similar_asset_names
 from dagster._core.errors import DagsterInvalidSubsetError
@@ -19,6 +19,7 @@ from dagster._core.selector.subset_selector import (
     fetch_sources,
     parse_clause,
 )
+from dagster._core.storage.tags import TAG_NO_VALUE
 from dagster._serdes.serdes import whitelist_for_serdes
 
 from .asset_check_spec import AssetCheckKey
@@ -173,6 +174,41 @@ class AssetSelection(ABC, BaseModel, frozen=True):
 
     @public
     @staticmethod
+    @experimental
+    def tag(key: str, value: str, include_sources: bool = False) -> "AssetSelection":
+        """Returns a selection that includes materializable assets that have the provided tag, and
+        all the asset checks that target them.
+
+
+        Args:
+            include_sources (bool): If True, then include source assets matching the group in the
+                selection.
+        """
+        return TagAssetSelection(key=key, value=value, include_sources=include_sources)
+
+    @staticmethod
+    def tag_string(string: str, include_sources: bool = False) -> "AssetSelection":
+        """Returns a selection that includes materializable assets that have the provided tag, and
+        all the asset checks that target them.
+
+
+        Args:
+            include_sources (bool): If True, then include source assets matching the group in the
+                selection.
+        """
+        split_by_equals_segments = string.split("=")
+        if len(split_by_equals_segments) == 1:
+            return TagAssetSelection(
+                key=string, value=TAG_NO_VALUE, include_sources=include_sources
+            )
+        elif len(split_by_equals_segments) == 2:
+            key, value = split_by_equals_segments
+            return TagAssetSelection(key=key, value=value, include_sources=include_sources)
+        else:
+            check.failed(f"Invalid tag selection string: {string}. Must have no more than one '='.")
+
+    @public
+    @staticmethod
     def checks_for_assets(*assets_defs: AssetsDefinition) -> "AssetChecksForAssetKeysSelection":
         """Returns a selection with the asset checks that target the provided assets."""
         return AssetChecksForAssetKeysSelection(
@@ -181,10 +217,17 @@ class AssetSelection(ABC, BaseModel, frozen=True):
 
     @public
     @staticmethod
-    def checks(*assets_defs: AssetsDefinition) -> "AssetCheckKeysSelection":
-        """Returns a selection that includes all of the provided asset checks."""
+    def checks(
+        *assets_defs_or_check_keys: Union[AssetsDefinition, AssetCheckKey],
+    ) -> "AssetCheckKeysSelection":
+        """Returns a selection that includes all of the provided asset checks or check keys."""
+        assets_defs = [ad for ad in assets_defs_or_check_keys if isinstance(ad, AssetsDefinition)]
+        check_keys = [key for key in assets_defs_or_check_keys if isinstance(key, AssetCheckKey)]
         return AssetCheckKeysSelection(
-            selected_asset_check_keys=[key for ad in assets_defs for key in ad.check_keys]
+            selected_asset_check_keys=[
+                *(key for ad in assets_defs for key in ad.check_keys),
+                *check_keys,
+            ]
         )
 
     @public
@@ -347,13 +390,17 @@ class AssetSelection(ABC, BaseModel, frozen=True):
     ) -> AbstractSet[AssetKey]:
         raise NotImplementedError()
 
-    def resolve_checks(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
+    def resolve_checks(
+        self, asset_graph: AssetGraph, allow_missing: bool = False
+    ) -> AbstractSet[AssetCheckKey]:
         """We don't need this method currently, but it makes things consistent with resolve_inner. Currently
         we don't store checks in the RemoteAssetGraph, so we only support AssetGraph.
         """
-        return self.resolve_checks_inner(asset_graph)
+        return self.resolve_checks_inner(asset_graph, allow_missing=allow_missing)
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
         """By default, resolve to checks that target the selected assets. This is overriden for particular selections."""
         asset_keys = self.resolve(asset_graph)
         return {handle for handle in asset_graph.asset_check_keys if handle.asset_key in asset_keys}
@@ -377,6 +424,10 @@ class AssetSelection(ABC, BaseModel, frozen=True):
             else:
                 selection = key_selection
             return selection
+
+        elif string.startswith("tag:"):
+            tag_str = string[len("tag:") :]
+            return cls.tag_string(tag_str)
 
         check.failed(f"Invalid selection string: {string}")
 
@@ -460,7 +511,9 @@ class AllAssetCheckSelection(AssetSelection, frozen=True):
     ) -> AbstractSet[AssetKey]:
         return set()
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
         return asset_graph.asset_check_keys
 
     def to_serializable_asset_selection(self, asset_graph: BaseAssetGraph) -> "AssetSelection":
@@ -479,7 +532,9 @@ class AssetChecksForAssetKeysSelection(AssetSelection, frozen=True):
     ) -> AbstractSet[AssetKey]:
         return set()
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
         return {
             handle
             for handle in asset_graph.asset_check_keys
@@ -499,12 +554,20 @@ class AssetCheckKeysSelection(AssetSelection, frozen=True):
     ) -> AbstractSet[AssetKey]:
         return set()
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
-        return {
-            handle
-            for handle in asset_graph.asset_check_keys
-            if handle in self.selected_asset_check_keys
-        }
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
+        specified_keys = set(self.selected_asset_check_keys)
+        missing_keys = {key for key in specified_keys if key not in asset_graph.asset_check_keys}
+
+        if not allow_missing and missing_keys:
+            raise DagsterInvalidSubsetError(
+                f"AssetCheckKey(s) {[k.to_user_string() for k in missing_keys]} were selected, but "
+                "no definitions supply these keys. Make sure all keys are spelled "
+                "correctly, and all definitions are correctly added to the "
+                f"`Definitions`."
+            )
+        return specified_keys & asset_graph.asset_check_keys
 
     def to_serializable_asset_selection(self, asset_graph: BaseAssetGraph) -> "AssetSelection":
         return self
@@ -529,10 +592,15 @@ class AndAssetSelection(
             ),
         )
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
         return reduce(
             operator.and_,
-            (selection.resolve_checks_inner(asset_graph) for selection in self.operands),
+            (
+                selection.resolve_checks_inner(asset_graph, allow_missing=allow_missing)
+                for selection in self.operands
+            ),
         )
 
     def to_serializable_asset_selection(self, asset_graph: BaseAssetGraph) -> "AssetSelection":
@@ -568,10 +636,15 @@ class OrAssetSelection(
             ),
         )
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
         return reduce(
             operator.or_,
-            (selection.resolve_checks_inner(asset_graph) for selection in self.operands),
+            (
+                selection.resolve_checks_inner(asset_graph, allow_missing=allow_missing)
+                for selection in self.operands
+            ),
         )
 
     def to_serializable_asset_selection(self, asset_graph: BaseAssetGraph) -> "AssetSelection":
@@ -604,10 +677,12 @@ class SubtractAssetSelection(
             asset_graph, allow_missing=allow_missing
         ) - self.right.resolve_inner(asset_graph, allow_missing=allow_missing)
 
-    def resolve_checks_inner(self, asset_graph: AssetGraph) -> AbstractSet[AssetCheckKey]:
-        return self.left.resolve_checks_inner(asset_graph) - self.right.resolve_checks_inner(
-            asset_graph
-        )
+    def resolve_checks_inner(
+        self, asset_graph: AssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetCheckKey]:
+        return self.left.resolve_checks_inner(
+            asset_graph, allow_missing=allow_missing
+        ) - self.right.resolve_checks_inner(asset_graph, allow_missing=allow_missing)
 
     def to_serializable_asset_selection(self, asset_graph: BaseAssetGraph) -> "AssetSelection":
         return self.replace(
@@ -742,6 +817,27 @@ class GroupsAssetSelection(AssetSelection, frozen=True):
             return f"group:{self.selected_groups[0]}"
         else:
             return f"group:({' or '.join(self.selected_groups)})"
+
+
+@whitelist_for_serdes
+class TagAssetSelection(AssetSelection, frozen=True):
+    key: str
+    value: str
+    include_sources: bool
+
+    def resolve_inner(
+        self, asset_graph: BaseAssetGraph, allow_missing: bool
+    ) -> AbstractSet[AssetKey]:
+        base_set = (
+            asset_graph.all_asset_keys
+            if self.include_sources
+            else asset_graph.materializable_asset_keys
+        )
+
+        return {key for key in base_set if asset_graph.get(key).tags.get(self.key) == self.value}
+
+    def __str__(self) -> str:
+        return f"tag:{self.key}={self.value}"
 
 
 @whitelist_for_serdes

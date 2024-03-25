@@ -1,15 +1,14 @@
+from collections import defaultdict
 from functools import cached_property
-from typing import AbstractSet, Iterable, Mapping, Optional, Sequence, Union
+from typing import AbstractSet, DefaultDict, Dict, Iterable, Mapping, Optional, Sequence, Set, Union
 
-import dagster._check as check
 from dagster._core.definitions.asset_check_spec import AssetCheckKey
-from dagster._core.definitions.asset_layer import subset_assets_defs
 from dagster._core.definitions.asset_spec import (
     SYSTEM_METADATA_KEY_AUTO_CREATED_STUB_ASSET,
     AssetExecutionType,
     AssetSpec,
 )
-from dagster._core.definitions.assets import AssetsDefinition
+from dagster._core.definitions.assets import AssetsDefinition, asset_owner_to_str
 from dagster._core.definitions.auto_materialize_policy import AutoMaterializePolicy
 from dagster._core.definitions.backfill_policy import BackfillPolicy
 from dagster._core.definitions.base_asset_graph import (
@@ -46,6 +45,10 @@ class AssetNode(BaseAssetNode):
         self._check_keys = check_keys
 
     @property
+    def description(self) -> Optional[str]:
+        return self.assets_def.descriptions_by_key.get(self.key)
+
+    @property
     def group_name(self) -> str:
         return self.assets_def.group_names_by_key.get(self.key, DEFAULT_GROUP_NAME)
 
@@ -68,6 +71,16 @@ class AssetNode(BaseAssetNode):
     @property
     def metadata(self) -> ArbitraryMetadataMapping:
         return self.assets_def.metadata_by_key.get(self.key, {})
+
+    @property
+    def tags(self) -> Mapping[str, str]:
+        return self.assets_def.tags_by_key.get(self.key, {})
+
+    @property
+    def owners(self) -> Sequence[str]:
+        return [
+            asset_owner_to_str(owner) for owner in self.assets_def.owners_by_key.get(self.key, [])
+        ]
 
     @property
     def is_partitioned(self) -> bool:
@@ -134,15 +147,15 @@ class AssetNode(BaseAssetNode):
 
 
 class AssetGraph(BaseAssetGraph[AssetNode]):
-    _asset_check_defs_by_key: Mapping[AssetCheckKey, AssetsDefinition]
+    _assets_defs_by_check_key: Mapping[AssetCheckKey, AssetsDefinition]
 
     def __init__(
         self,
         asset_nodes_by_key: Mapping[AssetKey, AssetNode],
-        asset_check_defs_by_key: Mapping[AssetCheckKey, AssetsDefinition],
+        assets_defs_by_check_key: Mapping[AssetCheckKey, AssetsDefinition],
     ):
         self._asset_nodes_by_key = asset_nodes_by_key
-        self._asset_check_defs_by_key = asset_check_defs_by_key
+        self._assets_defs_by_check_key = assets_defs_by_check_key
         self._asset_nodes_by_check_key = {
             check_key: asset
             for asset in asset_nodes_by_key.values()
@@ -211,27 +224,29 @@ class AssetGraph(BaseAssetGraph[AssetNode]):
         # Build the set of AssetNodes. Each node holds key rather than object references to parent
         # and child nodes.
         dep_graph = generate_asset_dep_graph(assets_defs)
+
+        assets_defs_by_check_key: Dict[AssetCheckKey, AssetsDefinition] = {}
+        check_keys_by_asset_key: DefaultDict[AssetKey, Set[AssetCheckKey]] = defaultdict(set)
+        for ad in assets_defs:
+            for ck in ad.check_keys:
+                check_keys_by_asset_key[ck.asset_key].add(ck)
+                assets_defs_by_check_key[ck] = ad
+
         asset_nodes_by_key = {
             key: AssetNode(
                 key=key,
                 parent_keys=dep_graph["upstream"][key],
                 child_keys=dep_graph["downstream"][key],
                 assets_def=ad,
-                check_keys={
-                    *(ck for ad in assets_defs for ck in ad.check_keys if ck.asset_key == key),
-                },
+                check_keys=check_keys_by_asset_key[key],
             )
             for ad in assets_defs
             for key in ad.keys
         }
 
-        asset_check_defs_by_key = {
-            key: assets_def for assets_def in assets_defs for key in assets_def.check_keys
-        }
-
         return AssetGraph(
             asset_nodes_by_key=asset_nodes_by_key,
-            asset_check_defs_by_key=asset_check_defs_by_key,
+            assets_defs_by_check_key=assets_defs_by_check_key,
         )
 
     def get_execution_set_asset_and_check_keys(
@@ -251,7 +266,7 @@ class AssetGraph(BaseAssetGraph[AssetNode]):
         return list(
             {
                 *(asset.assets_def for asset in self.asset_nodes),
-                *(ad for ad in self._asset_check_defs_by_key.values()),
+                *(ad for ad in self._assets_defs_by_check_key.values()),
             }
         )
 
@@ -262,9 +277,9 @@ class AssetGraph(BaseAssetGraph[AssetNode]):
             {
                 *[self.get(key).assets_def for key in keys if isinstance(key, AssetKey)],
                 *[
-                    ad
-                    for k, ad in self._asset_check_defs_by_key.items()
-                    if k in keys and isinstance(ad, AssetsDefinition)
+                    self._assets_defs_by_check_key[key]
+                    for key in keys
+                    if isinstance(key, AssetCheckKey)
                 ],
             }
         )
@@ -272,37 +287,3 @@ class AssetGraph(BaseAssetGraph[AssetNode]):
     @cached_property
     def asset_check_keys(self) -> AbstractSet[AssetCheckKey]:
         return {key for ad in self.assets_defs for key in ad.check_keys}
-
-    def get_subset(
-        self,
-        executable_asset_keys: AbstractSet[AssetKey],
-        asset_check_keys: Optional[AbstractSet[AssetCheckKey]] = None,
-    ) -> "AssetGraph":
-        """Returns a new asset graph where only the provided asset keys are executable. All parent
-        keys of a selected executable asset will be included as unexecutable external assets (unless
-        they are themselves present in the executable selection).
-        """
-        from dagster._core.definitions.external_asset import (
-            create_unexecutable_external_assets_from_assets_def,
-        )
-
-        invalid_executable_keys = executable_asset_keys - self.executable_asset_keys
-        if invalid_executable_keys:
-            check.failed(
-                "Provided executable asset keys must be a subset of existing executable asset keys."
-                f" Invalid provided keys: {invalid_executable_keys}",
-            )
-
-        # subset_assets_defs returns two lists of Assetsfinitions-- those included and those
-        # excluded by the selection. These collections retain their original execution type. We need
-        # to convert the excluded assets to unexecutable external assets.
-        executable_assets_defs, excluded_assets_defs = subset_assets_defs(
-            self.assets_defs, executable_asset_keys, asset_check_keys
-        )
-        loadable_assets_defs = [
-            unexecutable_ad
-            for ad in excluded_assets_defs
-            for unexecutable_ad in create_unexecutable_external_assets_from_assets_def(ad)
-        ]
-
-        return self.from_assets([*executable_assets_defs, *loadable_assets_defs])

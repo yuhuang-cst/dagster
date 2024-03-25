@@ -246,6 +246,20 @@ export type RunMetadataProviderMessageFragment_ObjectStoreOperationEvent = {
           description: string | null;
         }
       | {
+          __typename: 'TableColumnLineageMetadataEntry';
+          label: string;
+          description: string | null;
+          lineage: Array<{
+            __typename: 'TableColumnLineageEntry';
+            columnName: string;
+            columnDeps: Array<{
+              __typename: 'TableColumnDep';
+              columnName: string;
+              assetKey: {__typename: 'AssetKey'; path: Array<string>};
+            }>;
+          }>;
+        }
+      | {
           __typename: 'TableMetadataEntry';
           label: string;
           description: string | null;
@@ -294,7 +308,7 @@ export type RunMetadataProviderMessageFragment_ObjectStoreOperationEvent = {
       | {__typename: 'TextMetadataEntry'; text: string; label: string; description: string | null}
       | {
           __typename: 'TimestampMetadataEntry';
-          timestamp: number | null;
+          timestamp: number;
           label: string;
           description: string | null;
         }

@@ -13,6 +13,7 @@ import {
   AssetCatalogTableQuery,
   AssetCatalogTableQueryVariables,
 } from './types/AssetsCatalogTable.types';
+import {COMMON_COLLATOR} from '../app/Util';
 import {useTrackPageView} from '../app/analytics';
 import {TimeContext} from '../app/time/TimeContext';
 import {browserTimezone} from '../app/time/browserTimezone';
@@ -28,8 +29,8 @@ import {repoAddressFromPath} from '../workspace/repoAddressFromPath';
 import {RepoAddress} from '../workspace/types';
 
 type AssetCountsResult = {
-  countsByOwner: Record<string, number>;
-  countsByComputeKind: Record<string, number>;
+  countsByOwner: CountByOwner[];
+  countsByComputeKind: CountByComputeKind[];
   countPerAssetGroup: CountPerGroupName[];
   countPerCodeLocation: CountPerCodeLocation[];
 };
@@ -38,6 +39,16 @@ export type GroupMetadata = {
   groupName: string;
   repositoryLocationName: string;
   repositoryName: string;
+};
+
+type CountByOwner = {
+  owner: string;
+  assetCount: number;
+};
+
+type CountByComputeKind = {
+  computeKind: string;
+  assetCount: number;
 };
 
 type CountPerGroupName = {
@@ -96,18 +107,55 @@ export function buildAssetCountBySection(assets: AssetDefinitionMetadata[]): Ass
         (assetCountByCodeLocation[stringifiedCodeLocation] || 0) + 1;
     });
 
-  const countPerAssetGroup = Object.entries(assetCountByGroup).map(([groupIdentifier, count]) => ({
-    assetCount: count,
-    groupMetadata: JSON.parse(groupIdentifier),
-  }));
+  const countsByOwner = Object.entries(assetCountByOwner)
+    .map(([owner, count]) => ({
+      owner,
+      assetCount: count,
+    }))
+    .sort(({owner: ownerA}, {owner: ownerB}) => COMMON_COLLATOR.compare(ownerA, ownerB));
+  const countsByComputeKind = Object.entries(assetCountByComputeKind)
+    .map(([computeKind, count]) => ({
+      computeKind,
+      assetCount: count,
+    }))
+    .sort(({computeKind: computeKindA}, {computeKind: computeKindB}) =>
+      COMMON_COLLATOR.compare(computeKindA, computeKindB),
+    );
+  const countPerAssetGroup = Object.entries(assetCountByGroup)
+    .map(([groupIdentifier, count]) => ({
+      assetCount: count,
+      groupMetadata: JSON.parse(groupIdentifier),
+    }))
+    .sort(
+      ({groupMetadata: groupMetadataA}, {groupMetadata: groupMetadataB}) =>
+        COMMON_COLLATOR.compare(
+          repoAddressAsHumanString({
+            name: groupMetadataA.repositoryName,
+            location: groupMetadataA.repositoryLocationName,
+          }),
+          repoAddressAsHumanString({
+            name: groupMetadataB.repositoryName,
+            location: groupMetadataB.repositoryLocationName,
+          }),
+        ) || COMMON_COLLATOR.compare(groupMetadataA.groupName, groupMetadataB.groupName),
+    );
+  const countPerCodeLocation = Object.entries(assetCountByCodeLocation)
+    .map(([key, count]) => ({
+      repoAddress: repoAddressFromPath(key)!,
+      assetCount: count,
+    }))
+    .sort(({repoAddress: repoAddressA}, {repoAddress: repoAddressB}) =>
+      COMMON_COLLATOR.compare(
+        repoAddressAsHumanString(repoAddressA),
+        repoAddressAsHumanString(repoAddressB),
+      ),
+    );
 
   return {
-    countsByOwner: assetCountByOwner,
-    countsByComputeKind: assetCountByComputeKind,
+    countsByOwner,
+    countsByComputeKind,
     countPerAssetGroup,
-    countPerCodeLocation: Object.entries(assetCountByCodeLocation).map(([key, count]) => {
-      return {repoAddress: repoAddressFromPath(key)!, assetCount: count};
-    }),
+    countPerCodeLocation,
   };
 }
 
@@ -175,6 +223,10 @@ const linkToAssetGraphGroup = (groupMetadata: GroupMetadata) => {
   return `/asset-groups?${qs.stringify({groups: JSON.stringify([groupMetadata])})}`;
 };
 
+const linkToAssetGraphOwner = (owner: string) => {
+  return `/asset-groups?${qs.stringify({owners: JSON.stringify([owner])})}`;
+};
+
 const linkToAssetGraphComputeKind = (computeKind: string) => {
   return `/asset-groups?${qs.stringify({
     computeKindTags: JSON.stringify([computeKind]),
@@ -212,6 +264,7 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
     timezone: [timezone],
   } = useContext(TimeContext);
   const recentlyVisitedAssets = fetchRecentlyVisitedAssetsFromLocalStorage();
+  const viewerFirstName = viewerName?.split(' ')[0];
 
   if (assetsQuery.loading) {
     return (
@@ -228,7 +281,7 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
   }
 
   return (
-    <>
+    <Box flex={{direction: 'column'}} style={{height: '100%'}}>
       <AssetPageHeader
         assetKey={{path: currentPath}}
         right={<ReloadAllButton label="Reload definitions" />}
@@ -239,7 +292,7 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
             <Box flex={{direction: 'row', alignItems: 'center', justifyContent: 'space-between'}}>
               <Heading>
                 {getGreeting(timezone)}
-                {viewerName ? `, ${viewerName}` : ''}
+                {viewerFirstName ? `, ${viewerFirstName}` : ''}
               </Heading>
               <Box flex={{direction: 'row', gap: 16, alignItems: 'center'}}>
                 <Link to="/assets">View all</Link>
@@ -269,9 +322,11 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
             <>
               <SectionHeader sectionName="Owners" />
               <SectionBody>
-                {Object.entries(assetCountBySection.countsByOwner).map(([label, count]) => (
-                  <CountForAssetType key={label} assetsCount={count}>
-                    <UserDisplay email={label} />
+                {assetCountBySection.countsByOwner.map(({owner, assetCount}) => (
+                  <CountForAssetType key={owner} assetsCount={assetCount}>
+                    <Link to={linkToAssetGraphOwner(owner)}>
+                      <UserDisplay email={owner} />
+                    </Link>
                   </CountForAssetType>
                 ))}
               </SectionBody>
@@ -281,10 +336,10 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
             <>
               <SectionHeader sectionName="Compute kinds" />
               <SectionBody>
-                {Object.entries(assetCountBySection.countsByComputeKind).map(([label, count]) => (
-                  <CountForAssetType key={label} assetsCount={count}>
-                    <TagIcon label={label} />
-                    <Link to={linkToAssetGraphComputeKind(label)}>{label}</Link>
+                {assetCountBySection.countsByComputeKind.map(({computeKind, assetCount}) => (
+                  <CountForAssetType key={computeKind} assetsCount={assetCount}>
+                    <TagIcon label={computeKind} />
+                    <Link to={linkToAssetGraphComputeKind(computeKind)}>{computeKind}</Link>
                   </CountForAssetType>
                 ))}
               </SectionBody>
@@ -304,7 +359,10 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
                       {assetGroupCount.groupMetadata.groupName}
                     </Link>
                     <span style={{color: Colors.textLighter()}}>
-                      {assetGroupCount.groupMetadata.repositoryLocationName}
+                      {repoAddressAsHumanString({
+                        name: assetGroupCount.groupMetadata.repositoryName,
+                        location: assetGroupCount.groupMetadata.repositoryLocationName,
+                      })}
                     </span>
                   </CountForAssetType>
                 ))}
@@ -331,7 +389,7 @@ export const AssetsOverview = ({viewerName}: {viewerName?: string}) => {
           )}
         </Box>
       </Box>
-    </>
+    </Box>
   );
 };
 
